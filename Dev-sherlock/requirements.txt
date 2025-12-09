@@ -1,0 +1,6 @@
+django>=3.2
+click>=8.0
+astor>=0.8.1
+colorama>=0.4.4
+jinja2>=3.0
+pyyaml>=5.4
