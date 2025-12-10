@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='django-codebase-mapper',
+    name='DjangoDevMap',
     version='0.1.0',
     description='Visualize and understand Django codebases through static analysis and runtime tracing',
     author='Your Name',
