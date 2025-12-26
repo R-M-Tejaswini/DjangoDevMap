@@ -21,7 +21,8 @@ def cli():
 @click.option('--output', default='./django_map', help='Output directory for visualizations')
 @click.option('--format', type=click.Choice(['html', 'mermaid', 'both']), default='both')
 @click.option('--include-tests', is_flag=True, help='Include test files in analysis')
-def analyze(path, output, format, include_tests):
+@click.option('--verbose', is_flag=True, help='Show detailed debug information')
+def analyze(path, output, format, include_tests, verbose):
     """Analyze Django project structure statically"""
     click.echo(f"{Fore.CYAN}🔍 Starting Django Codebase Analysis...{Style.RESET_ALL}")
     
@@ -47,7 +48,7 @@ def analyze(path, output, format, include_tests):
     analysis_result = analyzer.analyze()
     
     # Display summary
-    _display_summary(analysis_result)
+    _display_summary(analysis_result, verbose)
     
     # Generate visualizations
     if format in ['html', 'both']:
@@ -150,7 +151,7 @@ def _is_django_project(path):
     """Check if directory contains a Django project"""
     return (path / 'manage.py').exists()
 
-def _display_summary(analysis_result):
+def _display_summary(analysis_result, verbose=False):
     """Display analysis summary"""
     stats = analysis_result.get('stats', {})
     
@@ -160,6 +161,14 @@ def _display_summary(analysis_result):
     click.echo(f"  • Models: {stats.get('total_models', 0)}")
     click.echo(f"  • Apps: {stats.get('total_apps', 0)}")
     click.echo(f"  • Required ENV vars: {stats.get('total_env_vars', 0)}")
+    
+    # Debug output
+    if verbose:
+        click.echo(f"\n{Fore.CYAN}🔍 Debug Info:{Style.RESET_ALL}")
+        click.echo(f"  Views found: {list(analysis_result.get('views', {}).keys())[:5]}...")  # First 5
+        click.echo(f"  Models found: {list(analysis_result.get('models', {}).keys())}")
+        click.echo(f"  URL patterns: {len(analysis_result.get('url_patterns', []))}")
+        click.echo(f"  Apps found: {analysis_result.get('apps', [])}")
 
 if __name__ == '__main__':
     cli()

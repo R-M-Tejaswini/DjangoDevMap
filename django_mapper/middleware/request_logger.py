@@ -149,5 +149,44 @@ class RequestLoggerMiddleware:
         try:
             with open(self.log_file, 'a') as f:
                 f.write(json.dumps(request_data) + '\n')
+            
+            # Also save aggregated runtime data for visualization
+            runtime_file = self.log_dir / 'runtime_data.json'
+            self._update_runtime_data(runtime_file, request_data)
         except Exception as e:
             print(f"Failed to log request: {e}")
+    
+    def _update_runtime_data(self, runtime_file: Path, request_data: dict):
+        """Update aggregated runtime data"""
+        try:
+            # Load existing data
+            if runtime_file.exists():
+                with open(runtime_file, 'r') as f:
+                    runtime_data = json.load(f)
+            else:
+                runtime_data = {
+                    'requests': [],
+                    'url_patterns': set(),
+                    'views': set(),
+                    'stats': {'total_requests': 0}
+                }
+            
+            # Add request
+            runtime_data['requests'].append(request_data)
+            runtime_data['stats']['total_requests'] += 1
+            
+            # Track URLs and views
+            if request_data.get('path'):
+                runtime_data['url_patterns'].add(request_data['path'])
+            if request_data.get('view_name'):
+                runtime_data['views'].add(request_data['view_name'])
+            
+            # Convert sets to lists for JSON serialization
+            runtime_data['url_patterns'] = list(runtime_data.get('url_patterns', set()))
+            runtime_data['views'] = list(runtime_data.get('views', set()))
+            
+            # Save
+            with open(runtime_file, 'w') as f:
+                json.dump(runtime_data, f, indent=2)
+        except Exception as e:
+            print(f"Failed to update runtime data: {e}")

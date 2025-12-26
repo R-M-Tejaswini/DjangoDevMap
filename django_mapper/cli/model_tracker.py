@@ -1,4 +1,5 @@
 import ast
+import re
 from pathlib import Path
 from typing import Dict, List
 
@@ -12,9 +13,8 @@ class ModelTracker:
         """Find all Django models in the project"""
         models = {}
         
-        # Find all models.py files (exclude site-packages and virtualenv)
+        # Find all models.py files
         for models_file in self.project_path.rglob('models.py'):
-            # Skip if in venv or site-packages
             if 'site-packages' in str(models_file) or 'venv' in str(models_file):
                 continue
             
@@ -24,6 +24,13 @@ class ModelTracker:
         # Also check for models/ directories
         for models_dir in self.project_path.rglob('models'):
             if models_dir.is_dir() and (models_dir / '__init__.py').exists():
+                # Check __init__.py for imports
+                init_file = models_dir / '__init__.py'
+                if init_file.exists():
+                    file_models = self._parse_models_file(init_file)
+                    models.update(file_models)
+                
+                # Parse individual model files
                 for py_file in models_dir.glob('*.py'):
                     if py_file.name != '__init__.py':
                         file_models = self._parse_models_file(py_file)
@@ -31,6 +38,144 @@ class ModelTracker:
         
         return models
     
+    def _parse_models_file(self, models_file: Path) -> Dict:
+        """Enhanced model parsing with better relationship detection"""
+        models = {}
+        
+        try:
+            content = models_file.read_text(encoding='utf-8')
+            
+            # Find all model classes
+            class_pattern = r'class\s+(\w+)\s*\([^)]*Model[^)]*\):'
+            model_classes = re.finditer(class_pattern, content)
+            
+            for match in model_classes:
+                model_name = match.group(1)
+                if model_name == 'Meta':  # Skip Meta classes
+                    continue
+                    
+                model_info = self._parse_single_model(content, model_name, models_file)
+                if model_info:
+                    models[model_name] = model_info
+                    
+        except Exception as e:
+            print(f"Error parsing models file {models_file}: {e}")
+        
+        return models
+    
+    def _parse_single_model(self, content: str, model_name: str, file_path: Path) -> Dict:
+        """Parse a single model class with enhanced field and relationship detection"""
+        
+        # Extract the model class content
+        class_start = content.find(f'class {model_name}')
+        if class_start == -1:
+            return None
+            
+        # Find the end of the class (next class or end of file)
+        next_class = content.find('\nclass ', class_start + 1)
+        if next_class == -1:
+            class_content = content[class_start:]
+        else:
+            class_content = content[class_start:next_class]
+        
+        model_info = {
+            'name': model_name,
+            'file': str(file_path.relative_to(self.project_path)),
+            'app': self._get_app_name(file_path),
+            'fields': [],
+            'methods': [],
+            'relationships': [],
+            'meta': {}
+        }
+        
+        # Parse fields
+        field_patterns = [
+            r'(\w+)\s*=\s*models\.(\w+)\s*\([^)]*\)',  # Standard fields
+            r'(\w+)\s*=\s*models\.(\w+)\s*\(\s*([^)]+)\)',  # Fields with options
+        ]
+        
+        for pattern in field_patterns:
+            fields = re.finditer(pattern, class_content)
+            for field_match in fields:
+                field_name = field_match.group(1)
+                field_type = field_match.group(2)
+                
+                field_info = {
+                    'name': field_name,
+                    'type': field_type,
+                    'options': {}
+                }
+                
+                # Parse field options if present
+                if len(field_match.groups()) > 2:
+                    options_str = field_match.group(3)
+                    field_info['options'] = self._parse_field_options(options_str)
+                
+                # Check for relationships
+                if field_type in ['ForeignKey', 'OneToOneField', 'ManyToManyField']:
+                    related_model = self._extract_related_model(field_match.group(0))
+                    if related_model:
+                        field_info['related_model'] = related_model
+                        model_info['relationships'].append({
+                            'field': field_name,
+                            'type': field_type,
+                            'related_model': related_model
+                        })
+                
+                model_info['fields'].append(field_info)
+        
+        # Parse methods
+        method_pattern = r'def\s+(\w+)\s*\(self[^)]*\):'
+        methods = re.findall(method_pattern, class_content)
+        model_info['methods'] = [m for m in methods if not m.startswith('_') or m in ['__str__', '__unicode__']]
+        
+        # Parse Meta class
+        meta_match = re.search(r'class Meta:(.*?)(?=\n    def|\n    \w+\s*=|\nclass|\Z)', class_content, re.DOTALL)
+        if meta_match:
+            meta_content = meta_match.group(1)
+            model_info['meta'] = self._parse_meta_class(meta_content)
+        
+        return model_info
+        
+    def _extract_related_model(self, field_declaration: str) -> str:
+        """Extract related model from field declaration"""
+        # Look for quoted model names
+        quoted_model = re.search(r'[\'"](\w+)[\'"]', field_declaration)
+        if quoted_model:
+            return quoted_model.group(1)
+            
+        # Look for direct model references
+        model_ref = re.search(r'models\.\w+\s*\(\s*(\w+)', field_declaration)
+        if model_ref:
+            return model_ref.group(1)
+            
+        return None
+        
+    def _parse_field_options(self, options_str: str) -> Dict:
+        """Parse field options from string"""
+        options = {}
+        
+        # Common option patterns
+        option_patterns = [
+            (r'max_length\s*=\s*(\d+)', 'max_length', int),
+            (r'null\s*=\s*(True|False)', 'null', lambda x: x == 'True'),
+            (r'blank\s*=\s*(True|False)', 'blank', lambda x: x == 'True'),
+            (r'unique\s*=\s*(True|False)', 'unique', lambda x: x == 'True'),
+            (r'db_index\s*=\s*(True|False)', 'db_index', lambda x: x == 'True'),
+            (r'default\s*=\s*([^,\)]+)', 'default', str),
+            (r'help_text\s*=\s*[\'"]([^\'"]+)[\'"]', 'help_text', str),
+        ]
+        
+        for pattern, key, converter in option_patterns:
+            match = re.search(pattern, options_str)
+            if match:
+                try:
+                    options[key] = converter(match.group(1).strip())
+                except:
+                    options[key] = match.group(1).strip()
+        
+        return options
+
     def _parse_models_file(self, file_path: Path) -> Dict:
         """Parse a models file and extract model definitions"""
         models = {}

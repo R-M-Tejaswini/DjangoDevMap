@@ -1,4 +1,5 @@
 import ast
+import re
 from pathlib import Path
 from typing import Dict, List
 
@@ -8,6 +9,126 @@ class ViewAnalyzer:
     def __init__(self, project_path: Path):
         self.project_path = project_path
         
+    def _view_in_file(self, view_file: Path, view_name: str) -> bool:
+        """Check if view exists in file"""
+        try:
+            content = view_file.read_text(encoding='utf-8')
+            
+            # Check for class-based views and ViewSets
+            class_patterns = [
+                rf'class\s+{view_name}\s*\(',  # Direct class name
+                rf'class\s+{view_name}ViewSet\s*\(',  # ViewSet pattern
+                rf'class\s+{view_name}View\s*\(',  # View pattern
+            ]
+            
+            for pattern in class_patterns:
+                if re.search(pattern, content):
+                    return True
+                    
+            # Check for function-based views
+            func_pattern = rf'def\s+{view_name}\s*\('
+            if re.search(func_pattern, content):
+                return True
+                
+            return False
+            
+        except Exception:
+            return False
+
+    def analyze_views(self, url_patterns: List[Dict]) -> Dict:
+        """Enhanced view analysis with better DRF support"""
+        views = {}
+        
+        for url_pattern in url_patterns:
+            view_name = url_pattern.get('view_name')
+            if not view_name or view_name in views:
+                continue
+                
+            # Parse view name to get the actual class/function name
+            if '.' in view_name:
+                parts = view_name.split('.')
+                actual_view_name = parts[-1]
+                module_hint = '.'.join(parts[:-1])
+            else:
+                actual_view_name = view_name
+                module_hint = None
+            
+            # Find the view file
+            view_file = self._find_view_file(actual_view_name, module_hint)
+            view_info = {
+                'name': view_name,
+                'found': view_file is not None,
+                'file': str(view_file.relative_to(self.project_path)) if view_file else None,
+                'type': url_pattern.get('view_type', 'unknown'),
+                'http_methods': url_pattern.get('methods', []),
+                'models_used': [],
+                'app': module_hint.split('.')[0] if module_hint else 'unknown',
+                'url_patterns': []  # Track which URLs use this view
+            }
+            
+            if view_file:
+                # Parse the view file to get more details
+                view_details = self._parse_view_details(view_file, actual_view_name)
+                view_info.update(view_details)
+            
+            views[view_name] = view_info
+        
+        # Second pass: Associate URL patterns with views
+        for url_pattern in url_patterns:
+            view_name = url_pattern.get('view_name')
+            if view_name in views:
+                views[view_name]['url_patterns'].append({
+                    'pattern': url_pattern.get('pattern'),
+                    'name': url_pattern.get('name'),
+                    'methods': url_pattern.get('methods', [])
+                })
+            
+        return views
+        
+    def _parse_view_details(self, view_file: Path, view_name: str) -> Dict:
+        """Parse view file to extract detailed information"""
+        details = {
+            'models_used': [],
+            'serializers_used': [],
+            'permissions': [],
+            'is_viewset': False,
+            'is_api_view': False,
+        }
+        
+        try:
+            content = view_file.read_text(encoding='utf-8')
+            
+            # Check if it's a ViewSet
+            if re.search(rf'class\s+{view_name}.*ViewSet\s*\(', content):
+                details['is_viewset'] = True
+                details['type'] = 'viewset'
+            elif re.search(rf'class\s+{view_name}.*APIView\s*\(', content):
+                details['is_api_view'] = True
+                details['type'] = 'apiview'
+            elif re.search(rf'class\s+{view_name}.*View\s*\(', content):
+                details['type'] = 'class_based_view'
+            else:
+                details['type'] = 'function_based_view'
+            
+            # Extract models used (look for imports and queryset references)
+            model_imports = re.findall(r'from\s+[\w.]+\.models\s+import\s+([\w, ]+)', content)
+            for import_line in model_imports:
+                models = [m.strip() for m in import_line.split(',')]
+                details['models_used'].extend(models)
+            
+            # Look for queryset references
+            queryset_refs = re.findall(r'(\w+)\.objects\.', content)
+            details['models_used'].extend(queryset_refs)
+            
+            # Remove duplicates
+            details['models_used'] = list(set(details['models_used']))
+            
+            return details
+            
+        except Exception as e:
+            print(f"Error parsing view details: {e}")
+            return details
+    
     def analyze_views(self, url_patterns: List[Dict]) -> Dict:
         """Analyze all views referenced in URL patterns"""
         views = {}
@@ -72,15 +193,18 @@ class ViewAnalyzer:
             if not module_hint:
                 module_hint = '.'.join(parts[:-1])
         
-        # Search for views.py files
-        for views_file in self.project_path.rglob('views.py'):
-            # Skip if in venv or site-packages
-            if 'site-packages' in str(views_file) or 'venv' in str(views_file):
-                continue
-            
-            # Check if view is in this file
-            if self._view_in_file(views_file, view_name):
-                return views_file
+        # Search patterns - views.py, handlers.py, viewsets.py, etc.
+        view_file_patterns = ['*views.py', '*handlers.py', '*viewsets.py', '*api.py']
+        
+        for pattern in view_file_patterns:
+            for views_file in self.project_path.rglob(pattern):
+                # Skip if in venv or site-packages
+                if 'site-packages' in str(views_file) or 'venv' in str(views_file):
+                    continue
+                
+                # Check if view is in this file
+                if self._view_in_file(views_file, view_name):
+                    return views_file
         
         # Also check views/ directories
         for views_dir in self.project_path.rglob('views'):
@@ -90,22 +214,6 @@ class ViewAnalyzer:
                         return py_file
         
         return None
-    
-    def _view_in_file(self, file_path: Path, view_name: str) -> bool:
-        """Check if a view is defined in a file"""
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                tree = ast.parse(content)
-        except:
-            return False
-        
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-                if node.name == view_name:
-                    return True
-        
-        return False
     
     def _find_view_definition(self, tree, view_name: str):
         """Find the view definition in AST"""
